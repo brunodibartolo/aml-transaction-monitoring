@@ -4,20 +4,23 @@ Plots the distribution of cash deposits between 2,000 and 10,000 EUR,
 legitimate vs structuring (stacked). Structuring clusters just below the
 threshold; legitimate cash-intensive businesses also fall in that range.
 """
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from amltm.io import load_data  # noqa: E402
+
 INK, MUTED, GRID, SURFACE = "#2b2b29", "#6b6a63", "#e6e5e0", "#fcfcfb"
 BLUE, ORANGE = "#2a78d6", "#eb6834"
 
 
 def main():
-    tx = pd.read_parquet(ROOT / "data" / "transactions.parquet",
-                         columns=["amount", "txn_type", "typology"])
+    _, _, tx = load_data(ROOT / "data")
     cash = tx[(tx.txn_type == "CASH_DEPOSIT") & tx.amount.between(2_000, 10_000)]
     legit = cash.loc[cash.typology.isna(), "amount"]
     struct = cash.loc[cash.typology == "structuring", "amount"]

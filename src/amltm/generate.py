@@ -8,9 +8,10 @@ and models find them.
 Three ingredients:
 1. Normal behaviour (salaries, card spending, bills, cash withdrawals, P2P
    transfers; for businesses: client receipts, suppliers, taxes).
-2. Legitimate "noisy" customers that look suspicious (family remittances abroad,
-   cash-intensive businesses, a one-off large operation). Without them any rule
-   would look perfect.
+2. Legitimate "noisy" customers that look suspicious: family remittances abroad,
+   cash-intensive businesses, one-off large operations, collectors (club
+   treasurers, group trips), cash side income, trade with high-risk countries.
+   Without them any rule would look perfect.
 3. Six laundering typologies from FATF / FIU guidance: structuring,
    fan-in/fan-out (money mules), cycles (round-tripping), high-risk
    jurisdictions, pass-through (rapid movement of funds), dormant account burst.
@@ -125,6 +126,9 @@ class SyntheticBank:
             (is_retail & (rng.random(n) < cfg.share_remitters * 0.3))
         cust["is_cash_business"] = (~is_retail) & (rng.random(n) < cfg.share_cash_business)
         cust["has_one_off"] = is_retail & (rng.random(n) < cfg.share_one_off_large)
+        cust["is_collector"] = is_retail & (rng.random(n) < cfg.share_collectors)
+        cust["has_cash_side_income"] = is_retail & (rng.random(n) < cfg.share_cash_side_income)
+        cust["is_hr_trader"] = (~is_retail) & (rng.random(n) < cfg.share_hr_trade)
 
         # launderers: random customers, typologies assigned by fixed shares
         n_l = int(round(n * cfg.share_launderers))
@@ -225,6 +229,14 @@ class SyntheticBank:
                 dst = self._family_account(acc, country)
                 self._add(self._times(ms, me, k), acc, dst,
                           inc * rng.uniform(0.08, 0.20, k), "WIRE")
+                if rng.random() < 0.15:                      # occasional larger family transfer
+                    self._add(self._times(ms, me, 1), acc, dst, rng.uniform(800, 3_000), "WIRE")
+            # irregular but legitimate cash income (tips, side jobs, cash rent)
+            if r.has_cash_side_income:
+                k = rng.integers(2, 7)
+                total = inc * rng.uniform(1.5, 3.5)
+                self._add(self._times(ms, me, k), "CASH", acc,
+                          np.round(total * rng.dirichlet(np.ones(k)), -1) + 50, "CASH_DEPOSIT")
 
         # one legitimate large operation: e.g. selling a house, then buying another
         if r.has_one_off:
@@ -234,6 +246,20 @@ class SyntheticBank:
             if rng.random() < 0.7:
                 self._add(t0 + rng.integers(2, 30) * DAY, acc, self._ext(self.cfg.home_country, "person"),
                           amt * rng.uniform(0.85, 1.0), "WIRE")
+
+        # collector: gathers small amounts from many people, then pays one supplier
+        # (sports club treasurer, group holiday, wedding gift). Looks like a money mule.
+        if r.is_collector:
+            for _ in range(rng.integers(1, 4)):
+                t0 = rng.integers(0, self.horizon // DAY - 15) * DAY
+                k = rng.integers(6, 21)
+                senders = [rng.choice(self.friends[acc]) if rng.random() < 0.4
+                           else self._ext(self.cfg.home_country, "person") for _ in range(k)]
+                amts = np.round(rng.uniform(20, 300, k), -1)
+                ts = self._times(t0, t0 + rng.integers(2, 8) * DAY, k)
+                self._add(ts, senders, acc, amts, "WIRE")
+                self._add(ts[-1] + rng.integers(1, 6) * DAY, acc, rng.choice(self.merchants),
+                          amts.sum() * rng.uniform(0.9, 1.0), "WIRE")
 
     def _family_account(self, acc, country):
         if not hasattr(self, "_family"):
@@ -267,6 +293,12 @@ class SyntheticBank:
             k = rng.poisson(12 * activity)
             self._add(self._times(ms, me, k), acc, list(rng.choice(suppliers, k)),
                       turnover * 0.55 / max(k, 1) * self._lognormal(1, 0.5, k), "WIRE")
+            # legitimate trade with a partner in a high-risk country
+            if r.is_hr_trader and rng.random() < 0.6:
+                partner = self._family_account(acc, self.cfg.high_risk_countries[
+                    int(acc[1:]) % len(self.cfg.high_risk_countries)])
+                src, dst = (acc, partner) if rng.random() < 0.7 else (partner, acc)
+                self._add(self._times(ms, me, 1), src, dst, rng.uniform(2_000, 25_000), "WIRE")
             for fs in foreign_sup:
                 if rng.random() < 0.5:
                     self._add(self._times(ms, me, 1), acc, fs,

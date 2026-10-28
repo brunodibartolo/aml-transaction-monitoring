@@ -23,6 +23,9 @@ class SimConfig:
     share_remitters: float = 0.08       # send money to family abroad every month
     share_cash_business: float = 0.25   # among businesses: bars, restaurants, shops
     share_one_off_large: float = 0.02   # one large legitimate operation (e.g. house sale)
+    share_collectors: float = 0.03      # collect money from many people (club treasurer, group trip)
+    share_cash_side_income: float = 0.03  # undeclared-looking but legitimate cash income (tips, side jobs)
+    share_hr_trade: float = 0.08        # among businesses: legitimate trade with high-risk countries
 
     # Reference cash threshold (illustrative) used by the structuring typology
     cash_threshold: float = 10_000.0
