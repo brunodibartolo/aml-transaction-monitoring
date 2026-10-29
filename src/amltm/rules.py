@@ -220,20 +220,38 @@ def s6_cash_vs_income(p: _Panel, cfg: RuleConfig, customers: pd.DataFrame):
 
 
 # ----------------------------------------------------------------------- run
+_SCENARIO_FUNCS = {
+    "S1": lambda p, cfg, c: s1_structuring(p, cfg),
+    "S2": lambda p, cfg, c: s2_high_risk(p, cfg),
+    "S3": s3_rapid_movement,
+    "S4": s4_fan_in,
+    "S5": lambda p, cfg, c: s5_activity_spike(p, cfg),
+    "S6": s6_cash_vs_income,
+}
+
+
+def prepare_panel(tx: pd.DataFrame, accounts: pd.DataFrame, customers: pd.DataFrame,
+                  cfg: RuleConfig | None = None) -> _Panel:
+    """Build the daily account panel once; scenarios can then be re-run cheaply."""
+    cfg = cfg or RuleConfig()
+    return _Panel(build_ledger(tx, accounts, customers, cfg.home_country), customers)
+
+
+def run_scenario(p: _Panel, cfg: RuleConfig, customers: pd.DataFrame, sid: str) -> pd.DataFrame:
+    """Alerts of a single scenario (used by threshold calibration)."""
+    return _SCENARIO_FUNCS[sid](p, cfg, customers)
+
+
 def run_rules(tx: pd.DataFrame, accounts: pd.DataFrame, customers: pd.DataFrame,
               cfg: RuleConfig | None = None) -> pd.DataFrame:
     """Run all scenarios and return one alert per row, with the customer attached."""
     cfg = cfg or RuleConfig()
-    led = build_ledger(tx, accounts, customers, cfg.home_country)
-    p = _Panel(led, customers)
-    alerts = pd.concat([
-        s1_structuring(p, cfg),
-        s2_high_risk(p, cfg),
-        s3_rapid_movement(p, cfg, customers),
-        s4_fan_in(p, cfg, customers),
-        s5_activity_spike(p, cfg),
-        s6_cash_vs_income(p, cfg, customers),
-    ], ignore_index=True)
+    p = prepare_panel(tx, accounts, customers, cfg)
+    parts = [run_scenario(p, cfg, customers, sid) for sid in SCENARIOS]
+    parts = [a for a in parts if len(a)]          # skip scenarios with no alert
+    if not parts:
+        parts = [pd.DataFrame(columns=["account_id", "scenario", "alert_date", "value"])]
+    alerts = pd.concat(parts, ignore_index=True)
     alerts = alerts.merge(customers[["account_id", "customer_id", "segment"]], on="account_id", how="left")
     alerts = alerts.sort_values(["alert_date", "scenario", "account_id"]).reset_index(drop=True)
     alerts.insert(0, "alert_id", [f"AL{i:06d}" for i in range(len(alerts))])
