@@ -3,8 +3,8 @@
 End-to-end anti-money-laundering (AML) transaction monitoring pipeline, built on a
 fully synthetic bank so that every step can be published and reproduced.
 
-> **Status: work in progress.** Steps 1-2 (synthetic data, rule-based scenarios) are
-> complete. Feature engineering, ML models and threshold calibration are next
+> **Status: work in progress.** Steps 1-3 (synthetic data, rule-based scenarios,
+> features and machine learning) are complete. Threshold calibration is next
 > (see roadmap).
 
 ## Why this project
@@ -116,6 +116,95 @@ ground truth (a proxy for an alert escalated to a suspicious activity report).
   lower. This is why the next steps focus on **ranking alerts by risk**, not only on
   raising alerts.
 
+## Step 3: features and machine learning
+
+### From transactions to customer-months
+
+`src/amltm/features.py` turns the 1 million transactions into a table with one row
+per **account and month** (30,000 rows), the same unit as the monthly rule alerts, so
+rules and models are compared on exactly the same rows. The label is 1 when the
+account touched at least one laundering transaction that month (289 rows, 0.96%).
+
+| Family | Features |
+|---|---|
+| Volume | number and amount of incoming / outgoing transfers, largest transfer, average inflow |
+| Cash | cash deposits (count, amount), deposits just below the threshold |
+| Counterparties | distinct senders, distinct receivers, number of foreign countries |
+| Geography | foreign inflows and outflows, amounts with high-risk countries |
+| Profile | volume and cash vs declared income, in/out balance, segment, KYC rating, nationality |
+| History and peers | volume vs the account's own previous months, vs the segment median |
+| Network | PageRank on the monthly transfer graph; size of the strongly connected component of large internal transfers (round trips) |
+
+### Models
+
+| Model | Type | Why |
+|---|---|---|
+| Isolation Forest | unsupervised | needs no labels: flags what is unusual |
+| Logistic regression | supervised, linear | simple, fully explainable baseline |
+| XGBoost | supervised, gradient-boosted trees | captures non-linear combinations of features |
+
+Supervised models are evaluated with **5-fold cross-validation grouped by customer**:
+all months of a customer are either in training or in test, so no model is ever scored
+on a customer it was trained on. Every row gets an out-of-fold score.
+
+### Results
+
+| Model | PR-AUC | Alerts to match the rules' detection | Alert reduction |
+|---|---:|---:|---:|
+| Rules (any scenario) | 0.48 | 1,391 | – |
+| Isolation Forest | 0.79 | 632 | −55% |
+| Logistic regression | 0.88 | 365 | −74% |
+| XGBoost | 0.98 | 259 | −81% |
+
+The rules flag 1,391 customer-months and detect 89% of laundering months. **To reach
+the same detection rate, XGBoost needs 259 reviews instead of 1,391 (−81%)**. Even the
+unsupervised Isolation Forest, which never sees a label, halves the workload. At the
+rules' own workload XGBoost also finds the 5 business launderers that no rule caught.
+
+![Alerts needed to match the rules' detection](reports/figures/ml_alerts_needed.png)
+
+![Precision-recall curves](reports/figures/ml_precision_recall.png)
+
+![Feature importance](reports/figures/ml_feature_importance.png)
+
+The most useful features are **relative**, not absolute: volume compared with declared
+income (48% of the gain) and with peers in the same segment (14%). This is the core
+argument for ML over fixed thresholds: one threshold cannot fit a pensioner and a
+wholesaler, a ratio to the customer's own profile can.
+
+### Stress test: schemes the model has never seen
+
+A supervised model can only learn patterns present in its training labels. To measure
+how much it depends on them, each typology in turn is **removed from training** and
+the model is asked to rank its customers anyway.
+
+| Typology | Rules: launderers caught | XGBoost PR-AUC, typology seen | XGBoost PR-AUC, typology never seen |
+|---|---:|---:|---:|
+| Cycle | 100% | 0.87 | **0.29** |
+| Dormant burst | 100% | 1.00 | 1.00 |
+| Fan-in / fan-out | 88% | 0.98 | 0.83 |
+| High-risk country | 100% | 0.89 | 0.86 |
+| Pass-through | 80% | 1.00 | 0.98 |
+| Structuring | 100% | 0.99 | 0.86 |
+
+Most schemes stay detectable because they share generic red flags (volumes far above
+the profile, unusual counterparties). **Cycles do not**: each hop of a round trip looks
+like an ordinary large transfer, and without labelled examples the model cannot tell
+that money is coming back. Here a dedicated rule or a graph-based detector remains
+necessary, so ML should **complement** the rules, not replace them.
+
+### Limitations
+
+- **Synthetic data flatters every model.** The laundering patterns were designed and
+  are cleaner than real ones; real-world PR-AUC would be far lower. The value of this
+  step is the method (grouped validation, comparison at equal workload, stress test),
+  not the absolute numbers.
+- **Labels are complete here.** In a bank, labels come from past investigations and
+  SARs, so they are few, delayed and biased towards what the rules already catch.
+- **Explainability.** A score must be justified to auditors and regulators. Feature
+  importance is a first step; per-alert explanations (e.g. SHAP) would be needed in
+  production.
+
 ## Quick start
 
 ```bash
@@ -125,7 +214,8 @@ pip install -r requirements.txt
 python scripts/generate_data.py          # writes data/ (~20 MB, ~30 s)
 python scripts/plot_data_overview.py     # step 1 figure
 python scripts/run_rules.py              # step 2: alerts, tables and figures
-pytest -q                                # 17 tests
+python scripts/run_models.py             # step 3: features, models, comparison (~1 min)
+pytest -q                                # 24 tests
 ```
 
 ## Project structure
@@ -136,9 +226,11 @@ aml-transaction-monitoring/
 │   ├── config.py        # simulation parameters
 │   ├── generate.py      # synthetic bank: customers, accounts, transactions
 │   ├── io.py            # load generated data (parquet or csv.gz)
-│   └── rules.py         # six rule-based scenarios and their evaluation
+│   ├── rules.py         # six rule-based scenarios and their evaluation
+│   ├── features.py      # customer-month features, incl. PageRank and round trips
+│   └── models.py        # Isolation Forest, logistic regression, XGBoost, evaluation
 ├── scripts/             # command-line entry points
-├── tests/               # pytest suite (data integrity, one test per rule)
+├── tests/               # pytest suite (data, rules, features, models)
 ├── reports/             # figures and result tables used in this README
 └── data/                # generated data (not versioned)
 ```
@@ -147,8 +239,8 @@ aml-transaction-monitoring/
 
 - [x] Synthetic data generator with six labelled typologies and legitimate look-alikes
 - [x] Rule-based scenarios with evaluation by scenario and typology
-- [ ] Customer-level features: rolling statistics, z-scores, peer comparison, PageRank
-- [ ] Models: Isolation Forest (unsupervised) and gradient boosting (supervised), PR-AUC
+- [x] Customer-month features: profile ratios, history and peer comparison, PageRank, round trips
+- [x] Models: Isolation Forest, logistic regression, XGBoost; grouped cross-validation; unseen-typology stress test
 - [ ] Threshold calibration: ATL/BTL testing and cost function
 - [ ] Results and discussion
 
